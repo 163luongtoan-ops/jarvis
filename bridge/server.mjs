@@ -326,9 +326,23 @@ function decideTool(name, input) {
       const tool = mcpToolOf(name)
       if (tool === 'computer') {
         const action = input?.action
+        // A screenshot is a read; a screenshot written to disk is not — same
+        // reasoning as createIfEmpty and clear just below.
+        if (action === 'screenshot' && input?.save_to_disk) return ALLOW_WRITES
         if (CHROME_COMPUTER_READ_ACTIONS.has(action)) return true
         if (CHROME_COMPUTER_WRITE_ACTIONS.has(action)) return ALLOW_WRITES
         return false
+      }
+      // Three of the read tools take a flag that turns them into a write:
+      // tabs_context_mcp can create a tab, and the two log readers can wipe
+      // what they just read. Named tools reaching here have already cleared
+      // CHROME_READ_TOOLS, so this only has to catch the flag.
+      if (
+        (tool === 'tabs_context_mcp' && input?.createIfEmpty) ||
+        ((tool === 'read_console_messages' || tool === 'read_network_requests') &&
+          input?.clear)
+      ) {
+        return ALLOW_WRITES
       }
       if (CHROME_READ_TOOLS.has(tool)) return true
       if (CHROME_WRITE_TOOLS.has(tool)) return ALLOW_WRITES
