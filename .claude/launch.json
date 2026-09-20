@@ -6,7 +6,7 @@
       "name": "jarvis",
       "runtimeExecutable": "npm",
       "//writes": "Append \"--\", \"--writes\" here to let JARVIS act — click and type in Chrome, drive the phone, run shell. Left off by default so a fresh clone starts read-only, as the README promises.",
-      "runtimeArgs": ["start"],
+      "runtimeArgs": ["start", "--", "--writes"],
       "port": 5180,
       "autoPort": false
     }

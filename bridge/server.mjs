@@ -252,7 +252,26 @@ const VETO_EXEMPT = new Set([
   'openrouter__send-feedback',
 ])
 
-function decideTool(name) {
+/**
+ * Acting tools on the built-in `claude-in-chrome` connector (enabled via
+ * `extraArgs: { chrome: null }`, the same thing the `claude --chrome` CLI
+ * flag does) that need ALLOW_WRITES. Everything else on that server — tabs,
+ * reading the page, navigating — is a read in the same sense chrome_navigate
+ * always was in the original jarvis_chrome design below.
+ */
+const CHROME_WRITE_TOOLS = new Set(['tabs_create_mcp', 'tabs_close_mcp', 'form_input'])
+
+/**
+ * `computer` bundles both reads (screenshot, scroll) and writes (click,
+ * type, key, drag) behind one tool name and an `action` argument, so it
+ * can't be gated by name alone the way the rest of this file works.
+ */
+const CHROME_COMPUTER_WRITE_ACTIONS = new Set([
+  'left_click', 'right_click', 'double_click', 'triple_click', 'type', 'key',
+  'left_click_drag', 'hover',
+])
+
+function decideTool(name, input) {
   if (READ_ONLY_BUILTINS.has(name)) return true
   if (WRITE_BUILTINS.has(name)) return ALLOW_WRITES
 
@@ -273,6 +292,23 @@ function decideTool(name) {
     // begins with no read verb and would fall to the write branch, which would
     // withhold the one tool the whole server is for.
     if (server === 'jarvis_chrome') return true
+
+    // The built-in browser connector (Claude for Chrome + its native host),
+    // reached via `extraArgs: { chrome: null }` because jarvis_chrome's own
+    // local-socket bridge above has no local socket to find on machines where
+    // the extension talks over the cloud relay instead — Windows, so far
+    // observed. Same read/write split chromeServer() draws by hand: tabs,
+    // reading the page and navigating are free; acting on it needs
+    // ALLOW_WRITES. `computer` carries both under one name, so its `action`
+    // decides rather than the tool name.
+    if (server === 'claude-in-chrome') {
+      const tool = mcpToolOf(name)
+      if (tool === 'computer') {
+        const action = input?.action
+        return CHROME_COMPUTER_WRITE_ACTIONS.has(action) ? ALLOW_WRITES : true
+      }
+      return CHROME_WRITE_TOOLS.has(tool) ? ALLOW_WRITES : true
+    }
 
     // The camera. Not withheld behind ALLOW_WRITES: looking changes nothing,
     // and the real gate is the browser's own camera permission plus an
@@ -395,11 +431,19 @@ browser or a web page:
 - But Chrome is your HANDS, not your display. Use it to reach and read things;
   then show what you found on a blade. Leaving the answer in a browser tab is
   not showing it — they are looking at this interface.
+- If \`chrome_status\` reports the browser unreachable, use the
+  \`mcp__claude-in-chrome__*\` tools instead before giving up on their own
+  Chrome — \`navigate\`, \`read_page\`, \`get_page_text\`, \`find\`, and
+  \`tabs_context_mcp\` read the same way \`chrome_read_page\` and
+  \`chrome_page_text\` do; \`computer\` with \`action: "screenshot"\` reads,
+  and with \`action: "left_click"\` / \`"type"\` / \`"key"\` acts. Same rule as
+  below: say what you're about to do before anything that changes something.
 - NEVER use playwright, puppeteer, or any other browser automation server for
   this. They start from an empty profile with no session and a fingerprint that
   the sites worth visiting refuse on sight, so they land on a login wall or a
-  bot check and waste the turn. Only consider one if \`chrome_status\` reports the
-  browser is genuinely unreachable and the task cannot be done any other way.
+  bot check and waste the turn. Only consider one if both \`chrome_status\` and
+  the \`claude-in-chrome\` tools report the browser genuinely unreachable and
+  the task cannot be done any other way.
 - A plain search engine query is still fine for a fact you only need to know —
   what you must not do is drive some other browser.
 - Read the page before acting on it, and take element references from that read
@@ -1220,6 +1264,20 @@ wss.on('connection', (socket) => {
       // of input tokens on every turn. Replacing it makes the persona stick,
       // keeps answers short enough to speak, and cuts cost per turn.
       systemPrompt: SYSTEM_PROMPT,
+      // Turns on the same built-in browser connector the `claude --chrome`
+      // CLI flag does, surfaced as `mcp__claude-in-chrome__*` tools. This is
+      // the fix for jarvis_chrome above being unreachable on machines where
+      // the Claude for Chrome extension talks to its native host over the
+      // cloud relay rather than a local socket (observed on Windows): the
+      // spawned CLI process holds the OAuth session that relay needs, which
+      // this bridge's own code has no way to hold or reimplement, so the
+      // fix is to ask the CLI to open the connector itself rather than to
+      // reach around it. Harmless to pass on a machine where jarvis_chrome's
+      // local socket already works — the model just has two ways to reach
+      // the same browser, and CHROME_WRITE_TOOLS / CHROME_COMPUTER_WRITE_ACTIONS
+      // in decideTool gate the second one exactly as chromeServer() gates
+      // the first.
+      extraArgs: { chrome: null },
       // Run from the home directory so project-scoped MCP servers don't shadow
       // the global ones, and so file tools have a sane root.
       cwd: homedir(),
@@ -1261,8 +1319,8 @@ wss.on('connection', (socket) => {
       // through a `Bash: echo hello` without asking, and only reaches us for
       // something with a consequence, like a `touch`. So a deny here is
       // reliable; an absence of a call here is not proof nothing ran.
-      canUseTool: async (toolName) => {
-        const ok = decideTool(toolName)
+      canUseTool: async (toolName, input) => {
+        const ok = decideTool(toolName, input)
         console.log(`[jarvis] tool ${toolName} -> ${ok ? 'allow' : 'deny'}`)
         return ok
           ? { behavior: 'allow' }
