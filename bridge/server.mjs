@@ -205,7 +205,7 @@ const mcpToolOf = (toolName) => toolName.split('__').slice(2).join('__')
  * `make_outbound_call` and `download_lottie` still until you ask for them.
  */
 const READ_ONLY_MCP = new Set([
-  'exa', 'exa-code', 'serper', 'serpapi', 'lottie-search', 'mcp-registry',
+  'exa', 'exa-code', 'serper', 'serpapi', 'duckduckgo', 'lottie-search', 'mcp-registry',
   'openrouter', 'openrouter-image', 'Microsoft_Clarity',
   // The generation servers belong here too, and leaving them out was a real
   // regression: `generate_image` begins with no read verb, so it fell to the
@@ -253,19 +253,39 @@ const VETO_EXEMPT = new Set([
 ])
 
 /**
- * Acting tools on the built-in `claude-in-chrome` connector (enabled via
- * `extraArgs: { chrome: null }`, the same thing the `claude --chrome` CLI
- * flag does) that need ALLOW_WRITES. Everything else on that server — tabs,
- * reading the page, navigating — is a read in the same sense chrome_navigate
- * always was in the original jarvis_chrome design below.
+ * The built-in `claude-in-chrome` connector's full tool surface, split into
+ * an explicit allow-list rather than a deny-list.
+ *
+ * A deny-list here was wrong, and CodeRabbit caught it: the connector has
+ * far more tools than clicks and tabs — `javascript_tool` runs arbitrary JS
+ * on the page, `file_upload`/`upload_image`/`gif_creator` write to disk,
+ * `shortcuts_execute` runs a stored macro. Naming only the writes and
+ * defaulting everything else to permitted meant every one of those ran
+ * unchecked in read-only mode, and any tool the connector adds later would
+ * default to permitted too. Both lists below are closed sets; anything not
+ * named in either is denied regardless of ALLOW_WRITES.
  */
-const CHROME_WRITE_TOOLS = new Set(['tabs_create_mcp', 'tabs_close_mcp', 'form_input'])
+const CHROME_READ_TOOLS = new Set([
+  'tabs_context_mcp', 'navigate', 'read_page', 'get_page_text', 'find',
+  'read_console_messages', 'read_network_requests', 'list_connected_browsers',
+  'shortcuts_list',
+])
+const CHROME_WRITE_TOOLS = new Set([
+  'tabs_create_mcp', 'tabs_close_mcp', 'form_input', 'javascript_tool',
+  'file_upload', 'upload_image', 'gif_creator', 'select_option',
+  'resize_window', 'shortcuts_execute', 'select_browser', 'switch_browser',
+  // Can bundle state-changing actions inside it, so it is gated as a whole
+  // rather than inspected batch-item by batch-item.
+  'browser_batch',
+])
 
 /**
  * `computer` bundles both reads (screenshot, scroll) and writes (click,
  * type, key, drag) behind one tool name and an `action` argument, so it
- * can't be gated by name alone the way the rest of this file works.
+ * can't be gated by name alone the way the rest of this file works. Also
+ * closed sets, for the same reason as above.
  */
+const CHROME_COMPUTER_READ_ACTIONS = new Set(['screenshot', 'scroll', 'wait', 'cursor_position'])
 const CHROME_COMPUTER_WRITE_ACTIONS = new Set([
   'left_click', 'right_click', 'double_click', 'triple_click', 'type', 'key',
   'left_click_drag', 'hover',
@@ -300,14 +320,19 @@ function decideTool(name, input) {
     // observed. Same read/write split chromeServer() draws by hand: tabs,
     // reading the page and navigating are free; acting on it needs
     // ALLOW_WRITES. `computer` carries both under one name, so its `action`
-    // decides rather than the tool name.
+    // decides rather than the tool name. Anything not on either allow-list —
+    // known or a tool this connector adds later — is denied, not permitted.
     if (server === 'claude-in-chrome') {
       const tool = mcpToolOf(name)
       if (tool === 'computer') {
         const action = input?.action
-        return CHROME_COMPUTER_WRITE_ACTIONS.has(action) ? ALLOW_WRITES : true
+        if (CHROME_COMPUTER_READ_ACTIONS.has(action)) return true
+        if (CHROME_COMPUTER_WRITE_ACTIONS.has(action)) return ALLOW_WRITES
+        return false
       }
-      return CHROME_WRITE_TOOLS.has(tool) ? ALLOW_WRITES : true
+      if (CHROME_READ_TOOLS.has(tool)) return true
+      if (CHROME_WRITE_TOOLS.has(tool)) return ALLOW_WRITES
+      return false
     }
 
     // The camera. Not withheld behind ALLOW_WRITES: looking changes nothing,
